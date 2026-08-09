@@ -4,7 +4,8 @@
 
 **Lightweight SIEM for local log monitoring.** 
 Parses Linux auth and system logs, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. No agents, no cloud, no dependencies beyond an optional `rich` install.
-
+---
+![LogScope demo output](image.png)
 ---
 
 ## Features
@@ -54,8 +55,6 @@ sudo python3 logscope.py --logs /var/log/auth.log /var/log/syslog
 
 # Try it instantly with built-in synthetic demo data
 python3 logscope.py --demo
-
-![LogScope demo output](image.png)
 
 # Export a JSON report to file
 sudo python3 logscope.py --format json --output report.json
