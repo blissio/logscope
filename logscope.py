@@ -35,7 +35,7 @@ console = Console() if RICH_AVAILABLE else None
 
 # ## Constants ################################################################
 
-VERSION = "1.0.0"
+VERSION = "0.9.0-beta"
 
 SEVERITY_COLORS = {
     "LOW":      "green",

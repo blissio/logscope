@@ -1,6 +1,6 @@
 # LogScope
 
-> **Work in Progress** — LogScope is under active development. Features may be incomplete, APIs may change, and bugs are expected. Contributions and feedback welcome.
+> **Beta release** — LogScope is now in a more capable beta stage, but features may still evolve, APIs may change, and bugs may remain. Contributions and feedback are welcome.
 
 **Lightweight SIEM for local log monitoring.** 
 Parses Linux auth and system logs, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. No agents, no cloud, no dependencies beyond an optional `rich` install.
@@ -54,6 +54,8 @@ sudo python3 logscope.py --logs /var/log/auth.log /var/log/syslog
 
 # Try it instantly with built-in synthetic demo data
 python3 logscope.py --demo
+
+![LogScope demo output](image.png)
 
 # Export a JSON report to file
 sudo python3 logscope.py --format json --output report.json
