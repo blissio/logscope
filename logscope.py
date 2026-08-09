@@ -5,15 +5,17 @@ Parses Linux auth and system logs, detects suspicious patterns,
 and outputs a threat report in the terminal or as JSON.
 """
 
+import ast
 import re
 import json
 import argparse
 import sys
 import os
+import time as time_module
 from datetime import datetime, time
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Optional, Any
 from pathlib import Path
 
 # ## Optional rich import ####################################################
@@ -59,6 +61,20 @@ DEFAULT_LOG_PATHS = [
     "/var/log/secure",          # RHEL/CentOS equivalent of auth.log
     "/var/log/messages",        # RHEL/CentOS equivalent of syslog
 ]
+
+WINDOWS_DEFAULT_LOG_PATHS = [
+    "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.log",
+    "C:/Windows/System32/logs/W3SVC1.log",
+    "C:/Windows/System32/drivers/etc/hosts",
+]
+
+
+def get_default_log_paths(platform_name: Optional[str] = None) -> list[str]:
+    if platform_name is None:
+        platform_name = sys.platform
+    if "win" in platform_name.lower():
+        return list(WINDOWS_DEFAULT_LOG_PATHS)
+    return list(DEFAULT_LOG_PATHS)
 
 # ## Data structures ##########################################################
 
@@ -106,6 +122,10 @@ class ScanResult:
 # Syslog timestamp: "Jan  1 12:34:56"
 TS_RE = re.compile(
     r"^(?P<month>\w{3})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})"
+)
+
+WINDOWS_TS_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<time>\d{2}:\d{2}:\d{2})"
 )
 
 PATTERNS = {
@@ -179,15 +199,116 @@ PATTERNS = {
 
 # ## Helper functions #########################################################
 
+def load_config(config_path: Optional[Path] = None) -> dict[str, Any]:
+    defaults = {
+        "logs": list(DEFAULT_LOG_PATHS),
+        "brute_threshold": BRUTE_FORCE_THRESHOLD,
+        "severity": None,
+        "format": "rich" if RICH_AVAILABLE else "plain",
+        "output": None,
+    }
+
+    if config_path is None:
+        config_path = Path.cwd() / "logscope.toml"
+    else:
+        config_path = Path(config_path)
+
+    if not config_path.exists():
+        return defaults
+
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return defaults
+
+    data: dict[str, Any] = {}
+    current_section: Optional[str] = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line[1:-1].strip()
+            continue
+        if "=" not in line:
+            continue
+
+        key, value = [part.strip() for part in line.split("=", 1)]
+        try:
+            if value.startswith("[") and value.endswith("]"):
+                parsed_value = ast.literal_eval(value)
+            elif (value.startswith('"') and value.endswith('"')) or (
+                value.startswith("'") and value.endswith("'")):
+                parsed_value = ast.literal_eval(value)
+            else:
+                parsed_value = int(value) if re.fullmatch(r"-?\d+", value) else value
+        except (ValueError, SyntaxError):
+            parsed_value = value
+
+        if current_section:
+            data.setdefault(current_section, {})[key] = parsed_value
+        else:
+            data[key] = parsed_value
+
+    section_data = data.get("logscope", {}) if isinstance(data.get("logscope"), dict) else {}
+    config = defaults.copy()
+    for key, value in section_data.items():
+        if key in config:
+            config[key] = value
+    return config
+
+
+def filter_findings(findings: list[Finding], allowlist: Optional[list[str]] = None, ignorelist: Optional[list[str]] = None) -> list[Finding]:
+    allow = {item.lower() for item in (allowlist or [])}
+    ignore = {item.lower() for item in (ignorelist or [])}
+
+    def matches(item: Optional[str]) -> bool:
+        if item is None:
+            return False
+        value = str(item).lower()
+        if allow:
+            return value in allow
+        return value not in ignore
+
+    filtered: list[Finding] = []
+    for finding in findings:
+        extra = finding.extra or {}
+        ip = extra.get("ip")
+        user = extra.get("user")
+        if allow:
+            if ip and matches(ip):
+                continue
+            if user and matches(user):
+                continue
+        else:
+            if ip and matches(ip):
+                continue
+            if user and matches(user):
+                continue
+        filtered.append(finding)
+    return filtered
+
+
 def extract_timestamp(line: str) -> Optional[str]:
     m = TS_RE.match(line)
     if m:
         return f"{m.group('month')} {m.group('day')} {m.group('time')}"
+    m = WINDOWS_TS_RE.match(line)
+    if m:
+        return f"{m.group('date')} {m.group('time')}"
     return None
 
 
 def parse_time_from_line(line: str) -> Optional[time]:
     m = TS_RE.match(line)
+    if m:
+        parts = m.group("time").split(":")
+        try:
+            return time(int(parts[0]), int(parts[1]), int(parts[2]))
+        except (ValueError, IndexError):
+            pass
+    m = WINDOWS_TS_RE.match(line)
     if m:
         parts = m.group("time").split(":")
         try:
@@ -238,6 +359,7 @@ class LogScope:
         for path_str in self.log_paths:
             path = Path(path_str)
             if not path.exists():
+                print(f"[scan] skipped missing file: {path}")
                 continue
             if not os.access(path, os.R_OK):
                 self._warn(f"[permission denied] {path}")
@@ -259,6 +381,34 @@ class LogScope:
 
         return result
 
+    def watch_once(self, interval: float = 0.5) -> dict[str, Any]:
+        for path_str in self.log_paths:
+            path = Path(path_str)
+            if path.exists():
+                return {
+                    "path": str(path),
+                    "file_exists": True,
+                    "interval": interval,
+                    "scanned": True,
+                }
+        time_module.sleep(interval)
+        return {
+            "path": str(self.log_paths[0]) if self.log_paths else None,
+            "file_exists": False,
+            "interval": interval,
+            "scanned": False,
+        }
+
+    def watch(self, interval: float = 0.5, iterations: Optional[int] = None) -> list[dict[str, Any]]:
+        states: list[dict[str, Any]] = []
+        count = 0
+        while iterations is None or count < iterations:
+            states.append(self.watch_once(interval=interval))
+            count += 1
+            if iterations is not None and count >= iterations:
+                break
+        return states
+
     # ## File parser ##########################################################
 
     def _parse_file(self, path: Path) -> tuple[list[Finding], int]:
@@ -271,6 +421,24 @@ class LogScope:
                 line = raw.rstrip()
                 ts   = extract_timestamp(line)
                 t    = parse_time_from_line(line)
+
+                if "failed password" in line.lower() and "from" in line:
+                    m = re.search(r"for (?P<user>\S+) from (?P<ip>[\d.]+)", line)
+                    if m:
+                        user = m.group("user")
+                        ip = m.group("ip")
+                        self._ssh_failures[ip].append((lineno, str(path), line))
+                        findings.append(Finding(
+                            rule="SSH_FAILED_LOGIN",
+                            severity="LOW",
+                            description=f"Failed SSH login attempt from {ip}",
+                            source_file=str(path),
+                            line_number=lineno,
+                            raw_line=line,
+                            timestamp=ts,
+                            extra={"ip": ip, "user": user},
+                        ))
+                        continue
 
                 # ## SSH failed password ##################################
                 m = PATTERNS["ssh_failed"].search(line)
@@ -622,6 +790,45 @@ def render_json(result: ScanResult, output_path: Optional[str] = None) -> None:
         print(data)
 
 
+def render_html(result: ScanResult, output: Optional[str] = None) -> None:
+    escaped_findings = []
+    for finding in result.findings:
+        escaped_findings.append(
+            "<tr>"
+            f"<td>{finding.severity}</td>"
+            f"<td>{finding.rule}</td>"
+            f"<td>{finding.description}</td>"
+            f"<td>{finding.source_file}:{finding.line_number}</td>"
+            "</tr>"
+        )
+
+    rows = "".join(escaped_findings)
+    html = f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <title>LogScope Report</title>
+  <style>body{{font-family:Arial,sans-serif; margin:2rem;}} table{{border-collapse:collapse; width:100%;}} th,td{{border:1px solid #ddd; padding:0.6rem; text-align:left;}} th{{background:#f3f3f3;}}</style>
+</head>
+<body>
+  <h1>LogScope Report</h1>
+  <p>Scan time: {result.scan_time}</p>
+  <p>Files parsed: {', '.join(result.files_parsed) or 'none'}</p>
+  <p>Findings: {len(result.findings)}</p>
+  <table>
+    <thead><tr><th>Severity</th><th>Rule</th><th>Description</th><th>Location</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</body>
+</html>"""
+
+    if output:
+        Path(output).write_text(html, encoding="utf-8")
+        print(f"HTML report written to: {output}")
+    else:
+        print(html)
+
+
 # ## CLI ######################################################################
 
 def build_parser() -> argparse.ArgumentParser:
@@ -639,17 +846,22 @@ Examples:
         """,
     )
     p.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Load settings from a configuration file (default: ./logscope.toml)",
+    )
+    p.add_argument(
         "--logs", "-l",
         nargs="+",
         metavar="FILE",
-        default=DEFAULT_LOG_PATHS,
-        help="Log file(s) to parse (default: standard Linux auth/syslog paths)",
+        default=None,
+        help="Log file(s) to parse (default: config or standard Linux auth/syslog paths)",
     )
     p.add_argument(
         "--format", "-f",
-        choices=["rich", "plain", "json"],
-        default="rich" if RICH_AVAILABLE else "plain",
-        help="Output format (default: rich if available, else plain)",
+        choices=["rich", "plain", "json", "html"],
+        default=None,
+        help="Output format (default: config or rich if available, else plain)",
     )
     p.add_argument(
         "--output", "-o",
@@ -659,20 +871,32 @@ Examples:
     p.add_argument(
         "--brute-threshold", "-b",
         type=int,
-        default=BRUTE_FORCE_THRESHOLD,
+        default=None,
         metavar="N",
-        help=f"Failed SSH attempts to trigger brute-force alert (default: {BRUTE_FORCE_THRESHOLD})",
+        help=f"Failed SSH attempts to trigger brute-force alert (default: config or {BRUTE_FORCE_THRESHOLD})",
     )
     p.add_argument(
         "--severity", "-s",
         choices=["LOW", "MEDIUM", "HIGH", "CRITICAL"],
         default=None,
-        help="Only show findings at or above this severity level",
+        help="Only show findings at or above this severity level (default: config or all)",
     )
     p.add_argument(
         "--demo",
         action="store_true",
         help="Run against a synthetic demo log (no real log files needed)",
+    )
+    p.add_argument(
+        "--watch",
+        action="store_true",
+        help="Continuously poll log files for new activity (use Ctrl+C to stop)",
+    )
+    p.add_argument(
+        "--watch-interval",
+        type=float,
+        default=2.0,
+        metavar="SECONDS",
+        help="Polling interval for watch mode (default: 2.0)",
     )
     p.add_argument(
         "--version", "-v",
@@ -720,7 +944,7 @@ Jan 15 04:55:00 host sshd[6001]: Accepted password for eve from 10.0.1.200 port 
 """
 
 
-def run_demo(args) -> ScanResult:
+def run_demo(args, brute_threshold: Optional[int] = None) -> ScanResult:
     import tempfile
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".log", prefix="logscope_demo_", delete=False
@@ -728,9 +952,13 @@ def run_demo(args) -> ScanResult:
         tmp.write(DEMO_LOG)
         tmp_path = tmp.name
 
+    threshold = brute_threshold if brute_threshold is not None else getattr(args, "brute_threshold", None)
+    if threshold is None:
+        threshold = BRUTE_FORCE_THRESHOLD
+
     scanner = LogScope(
         log_paths=[tmp_path],
-        brute_threshold=args.brute_threshold,
+        brute_threshold=threshold,
     )
     result = scanner.scan()
     os.unlink(tmp_path)
@@ -743,28 +971,73 @@ def main() -> int:
     parser = build_parser()
     args   = parser.parse_args()
 
+    config = load_config(Path(args.config) if args.config else None)
+
+    if not args.logs:
+        configured_logs = config.get("logs")
+        if configured_logs:
+            log_paths = configured_logs
+        else:
+            log_paths = get_default_log_paths()
+    else:
+        log_paths = args.logs
+    brute_threshold = args.brute_threshold
+    if brute_threshold is None:
+        brute_threshold = int(config.get("brute_threshold", BRUTE_FORCE_THRESHOLD))
+    severity = args.severity or config.get("severity")
+    fmt = args.format or config.get("format") or ("rich" if RICH_AVAILABLE else "plain")
+    output_path = config.get("output")
+
     # Run scan ################################################################
+    scanner = LogScope(
+        log_paths=log_paths,
+        brute_threshold=brute_threshold,
+    )
+
+    if args.watch:
+        print(f"[watch] monitoring {', '.join(log_paths)} every {args.watch_interval:.1f}s")
+        try:
+            while True:
+                print(f"[watch] scanning at {datetime.now().strftime('%H:%M:%S')}")
+                result = scanner.scan()
+                print(f"[scan] parsed {len(result.files_parsed)} file(s), found {len(result.findings)} finding(s)")
+                if result.findings:
+                    render_plain(result)
+                else:
+                    print("[watch] no suspicious activity detected")
+                time_module.sleep(args.watch_interval)
+        except KeyboardInterrupt:
+            print("\nWatch mode stopped.")
+            return 0
+
     if args.demo:
         result = run_demo(args)
     else:
-        scanner = LogScope(
-            log_paths=args.logs,
-            brute_threshold=args.brute_threshold,
-        )
         result = scanner.scan()
 
+    print(f"[scan] parsed {len(result.files_parsed)} file(s), found {len(result.findings)} finding(s)")
+
     # Severity filter #########################################################
-    if args.severity:
-        min_rank = SEVERITY_RANK[args.severity]
+    if severity:
+        min_rank = SEVERITY_RANK[severity]
         result.findings = [
             f for f in result.findings
             if SEVERITY_RANK.get(f.severity, 0) >= min_rank
         ]
 
+    allowlist = config.get("allowlist") or []
+    ignorelist = config.get("ignorelist") or []
+    if allowlist or ignorelist:
+        result.findings = filter_findings(result.findings, allowlist=allowlist, ignorelist=ignorelist)
+
+    if not result.files_parsed:
+        print("[scan] no readable log files were found")
+
     # Render ##################################################################
-    fmt = args.format
     if fmt == "json":
-        render_json(result, args.output)
+        render_json(result, args.output or output_path)
+    elif fmt == "html":
+        render_html(result, output=args.output or output_path)
     elif fmt == "plain" or not RICH_AVAILABLE:
         render_plain(result)
     else:

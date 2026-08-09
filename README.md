@@ -23,7 +23,7 @@ Parses Linux auth and system logs, detects suspicious patterns, and outputs a th
 ## Requirements
 
 - Python 3.10+
-- Linux system with standard log files (`/var/log/auth.log`, `/var/log/syslog`, etc.)
+- Linux system with standard log files (`/var/log/auth.log`, `/var/log/syslog`, etc.) or a Windows machine with accessible event/log files
 - [`rich`](https://github.com/Textualize/rich) *(optional, for coloured terminal output)*
 
 ```bash
@@ -61,11 +61,36 @@ sudo python3 logscope.py --format json --output report.json
 # Print JSON to stdout
 sudo python3 logscope.py --format json
 
+# Load settings from a config file
+python3 logscope.py --config logscope.toml
+
+# Skip findings from specific IPs or users
+python3 logscope.py --config logscope.toml
+
 # Only show HIGH and above
 sudo python3 logscope.py --severity HIGH
 
 # Adjust brute-force threshold (default: 5 attempts)
 sudo python3 logscope.py --brute-threshold 3
+
+# Watch log files continuously
+python3 logscope.py --watch --watch-interval 2
+
+# Export an HTML report
+python3 logscope.py --format html --output report.html
+```
+
+Example config file:
+
+```toml
+[logscope]
+logs = ["/var/log/auth.log", "/var/log/syslog"]
+brute_threshold = 3
+severity = "HIGH"
+format = "json"
+output = "report.json"
+allowlist = ["10.0.0.5"]
+ignorelist = ["root"]
 ```
 
 ---
@@ -80,6 +105,10 @@ sudo python3 logscope.py --brute-threshold 3
 | `--severity` | *(all)* | Minimum severity filter: `LOW` `MEDIUM` `HIGH` `CRITICAL` |
 | `--brute-threshold N` | `5` | Failed SSH attempts before brute-force alert |
 | `--demo` | — | Run against built-in synthetic demo log |
+| `--config FILE` | `./logscope.toml` | Load settings from a config file |
+| `--watch` | — | Continuously poll log files for new activity |
+| `--watch-interval SECONDS` | `2.0` | Polling interval for watch mode |
+| `--format` | `rich` / `plain` | Output format: `rich`, `plain`, `json`, or `html` |
 | `--version` | — | Print version and exit |
 
 ---
@@ -129,10 +158,11 @@ Files that don't exist or aren't readable are silently skipped.
 
 Things planned or in progress — not yet implemented:
 
-- [ ] Watch mode (`--watch`) for real-time log tailing
-- [ ] Config file support (`logscope.toml`)
-- [ ] Allowlist/ignorelist for IPs and users
-- [ ] HTML report output
+- [x] Config file support (`logscope.toml`)
+- [x] Allowlist/ignorelist for IPs and users
+- [x] Watch mode (`--watch`) for real-time log tailing
+- [x] Basic Windows-style log parsing support
+- [x] HTML report output
 - [ ] Journald (`journalctl`) support
 - [ ] Email/webhook alerting
 - [ ] Rate limiting / deduplication for noisy rules
@@ -146,6 +176,7 @@ Things planned or in progress — not yet implemented:
 - Port scan detection is heuristic (DROP count per source IP); sophisticated scans spread across many IPs will not be caught
 - No support for compressed/rotated logs (`.gz`, `.1`, etc.) yet
 - Requires direct file read access — does not parse `journald` binary logs
+- Windows support is currently best-effort and uses a small set of platform-aware default paths rather than full Event Log integration
 
 ---
 
