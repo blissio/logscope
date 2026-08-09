@@ -35,7 +35,7 @@ pip install rich
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/logscope.git
+git clone https://github.com/blissio/logscope.git
 cd logscope
 ```
 
