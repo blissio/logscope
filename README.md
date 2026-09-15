@@ -2,8 +2,8 @@
 
 > **Beta release** — LogScope is now in a more capable beta stage, but features may still evolve, APIs may change, and bugs may remain. Contributions and feedback are welcome.
 
-**Lightweight SIEM for local log monitoring.** 
-Parses Linux auth and system logs, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. No agents, no cloud, no dependencies beyond an optional `rich` install.
+**Lightweight host security monitor for local log monitoring.** 
+Parses local authentication and system logs, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. It is designed for one host, with no agents, no cloud, and no dependencies beyond an optional `rich` install.
 ---
 ![LogScope demo output](image.png)
 ---
@@ -166,18 +166,24 @@ Things planned or in progress — not yet implemented:
 - [x] HTML report output
 - [ ] Journald (`journalctl`) support
 - [ ] Email/webhook alerting
-- [ ] Rate limiting / deduplication for noisy rules
-- [ ] Unit test coverage
+- [x] Rate limiting / deduplication for noisy rules
+- [x] Core unit test coverage
+- [ ] Time-window correlation and bounded long-running state
+- [ ] Journald (`journalctl`) adapter
+- [ ] Native Windows Event Log adapter
+- [ ] Email/webhook alerting
 
 ---
 
 ## Known Limitations
 
 - Timestamp parsing assumes standard syslog format — non-standard log formats may be partially parsed or missed
+- Detection state currently lives in memory for the lifetime of a monitor process; threshold correlation is not yet time-windowed
 - Port scan detection is heuristic (DROP count per source IP); sophisticated scans spread across many IPs will not be caught
 - No support for compressed/rotated logs (`.gz`, `.1`, etc.) yet
 - Requires direct file read access — does not parse `journald` binary logs
 - Windows support is currently best-effort and uses a small set of platform-aware default paths rather than full Event Log integration
+- LogScope is not a centralized SIEM: it does not collect from multiple hosts or provide a shared dashboard and investigation workflow
 
 ---
 
