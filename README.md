@@ -5,7 +5,7 @@
 **Lightweight host security monitor for local log monitoring.** 
 Parses local authentication and system logs, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. It is designed for one host, with no agents, no cloud, and no dependencies beyond an optional `rich` install.
 ---
-![LogScope demo output](image.png)
+![LogScope demo output](demo.png)
 ---
 
 ## Features
