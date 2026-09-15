@@ -574,6 +574,42 @@ class LogScope:
         )
         return result
 
+    def scan_windows(
+        self,
+        channels: Optional[list[str]] = None,
+        max_events: int = 1000,
+        after_record_ids: Optional[dict[str, int]] = None,
+    ) -> ScanResult:
+        """Scan native Windows Event Log channels through the Windows backend."""
+        from windows_events import SUPPORTED_CHANNELS, collect_events, findings_from_events
+
+        selected_channels = channels or list(SUPPORTED_CHANNELS)
+        events = collect_events(
+            selected_channels,
+            max_events=max_events,
+            after_record_ids=after_record_ids,
+        )
+        result = ScanResult(
+            scan_time=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            files_parsed=[f"Windows Event Log: {channel}" for channel in selected_channels],
+            total_lines=len(events),
+            findings=findings_from_events(events),
+        )
+        unique: list[Finding] = []
+        for finding in result.findings:
+            if finding.fingerprint not in self._seen_fingerprints:
+                self._seen_fingerprints.add(finding.fingerprint)
+                unique.append(finding)
+        result.findings = sorted(
+            unique,
+            key=lambda finding: (
+                -SEVERITY_RANK.get(finding.severity, 0),
+                finding.source_file,
+                finding.line_number,
+            ),
+        )
+        return result
+
     def watch(
         self,
         interval: float = 2.0,
@@ -1204,6 +1240,45 @@ Examples:
         help="Log file(s) to parse (default: config or standard Linux auth/syslog paths)",
     )
     p.add_argument(
+        "--windows-events",
+        action="store_true",
+        help="Read native Windows Event Log channels instead of text log files",
+    )
+    p.add_argument(
+        "--windows-channel",
+        action="append",
+        dest="windows_channels",
+        metavar="CHANNEL",
+        help="Windows Event Log channel to scan; may be repeated",
+    )
+    p.add_argument(
+        "--windows-max-events",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Maximum native Windows events to read per scan (default: 1000)",
+    )
+    p.add_argument(
+        "--inventory",
+        action="store_true",
+        help="Print installed Windows software inventory as JSON",
+    )
+    p.add_argument(
+        "--cve-sync",
+        action="store_true",
+        help="Synchronize modified CVE records from the NVD into the local database",
+    )
+    p.add_argument(
+        "--cve-scan",
+        action="store_true",
+        help="Match installed Windows software against the local NVD cache",
+    )
+    p.add_argument(
+        "--cve-offline",
+        action="store_true",
+        help="Run CVE matching without contacting the NVD",
+    )
+    p.add_argument(
         "--format", "-f",
         choices=["rich", "plain", "json", "html"],
         default=None,
@@ -1307,11 +1382,41 @@ def main() -> int:
     if os.environ.get("NO_COLOR"):
         fmt = "plain"
 
+    use_windows_events = args.windows_events or (
+        sys.platform == "win32" and not args.logs and not args.demo
+    )
+
     scanner = LogScope(
-        log_paths=log_paths,
+        log_paths=[] if use_windows_events else log_paths,
         brute_threshold=brute_threshold,
         port_scan_threshold=port_scan_threshold,
     )
+
+    if args.inventory or args.cve_sync or args.cve_scan:
+        try:
+            from software_inventory import collect_installed_software
+            from cve_client import CVECache, match_records, sync_nvd
+            import os as _os
+
+            if args.inventory and not args.cve_scan and not args.cve_sync:
+                print(json.dumps([item.to_dict() for item in collect_installed_software()], indent=2))
+                return 0
+
+            with CVECache(database_path) as cache:
+                if args.cve_sync and not args.cve_offline:
+                    sync_nvd(
+                        cache,
+                        api_key=_os.environ.get("NVD_API_KEY"),
+                        modified_since=cache.get_sync_value("last_sync"),
+                    )
+                if args.cve_scan:
+                    products = collect_installed_software()
+                    matches = match_records(products, cache.records())
+                    print(json.dumps([match.to_dict() for match in matches], indent=2))
+                    return 1 if matches else 0
+        except Exception as exc:
+            print(f"[cve] operation failed: {exc}", file=sys.stderr)
+            return 2
 
     # Watch mode --------------------------------------------------------
     if args.watch:
@@ -1339,6 +1444,15 @@ def main() -> int:
     # Demo or normal scan -----------------------------------------------
     if args.demo:
         result = run_demo(brute_threshold=brute_threshold, port_scan_threshold=port_scan_threshold)
+    elif use_windows_events:
+        try:
+            result = scanner.scan_windows(
+                channels=args.windows_channels,
+                max_events=args.windows_max_events,
+            )
+        except Exception as exc:
+            print(f"[scan] Windows Event Log collection failed: {exc}", file=sys.stderr)
+            return 2
     else:
         result = scanner.scan()
 

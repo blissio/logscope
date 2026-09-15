@@ -2,8 +2,8 @@
 
 > **Beta release** — LogScope is now in a more capable beta stage, but features may still evolve, APIs may change, and bugs may remain. Contributions and feedback are welcome.
 
-**Lightweight host security monitor for local log monitoring.** 
-Parses local authentication and system logs, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. It is designed for one host, with no agents, no cloud, and no dependencies beyond an optional `rich` install.
+**Lightweight host security monitor for Linux logs and native Windows Event Logs.**
+Parses local security activity, detects suspicious patterns, and outputs a threat report in your terminal or as JSON. Windows collection uses the native Event Log API through optional `pywin32`. CVE scanning uses an explicitly requested NVD sync and a local cache.
 ---
 ![LogScope demo output](demo.png)
 ---
@@ -18,14 +18,17 @@ Parses local authentication and system logs, detects suspicious patterns, and ou
 - **Severity scoring** — every finding is rated `LOW` · `MEDIUM` · `HIGH` · `CRITICAL`
 - ️ **Rich terminal output** — coloured, tabulated report via `rich` (falls back to plain text)
 - **JSON export** — machine-readable output for piping into other tools
+- **Native Windows monitoring** — Security, System, PowerShell, and Defender event channels
+- **CVE inventory checks** — installed Windows software matched against cached NVD records
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- Linux system with standard log files (`/var/log/auth.log`, `/var/log/syslog`, etc.) or a Windows machine with accessible event/log files
+- Linux system with standard log files (`/var/log/auth.log`, `/var/log/syslog`, etc.) or Windows 10/11/Server with Event Log access
 - [`rich`](https://github.com/Textualize/rich) *(optional, for coloured terminal output)*
+- Windows: `pywin32` *(install with `pip install -r requirements-windows.txt`)*
 
 ```bash
 pip install rich
@@ -79,7 +82,21 @@ python3 logscope.py --watch --watch-interval 2
 
 # Export an HTML report
 python3 logscope.py --format html --output report.html
+
+# Windows native Event Log scan (run PowerShell or Command Prompt as Administrator)
+python logscope.py --windows-events --format json --output windows-report.json
+
+# Windows installed software inventory
+python logscope.py --inventory
+
+# Synchronize current CVEs, then scan installed software against the local cache
+python logscope.py --cve-sync --cve-scan
+
+# Run the CVE scan without network access
+python logscope.py --cve-scan --cve-offline
 ```
+
+Set `NVD_API_KEY` before synchronization if you have an NVD API key. The CVE database is stored in the configured SQLite database, and scans can use the last successful cache offline.
 
 Example config file:
 
@@ -111,6 +128,12 @@ ignorelist = ["root"]
 | `--watch-interval SECONDS` | `2.0` | Polling interval for watch mode |
 | `--format` | `rich` / `plain` | Output format: `rich`, `plain`, `json`, or `html` |
 | `--version` | — | Print version and exit |
+| `--windows-events` | — | Read native Windows Event Log channels |
+| `--windows-channel CHANNEL` | Built-in channels | Restrict Windows collection to a channel; repeatable |
+| `--inventory` | — | Print installed Windows software as JSON |
+| `--cve-sync` | — | Synchronize modified CVEs from NVD |
+| `--cve-scan` | — | Match installed Windows software against cached CVEs |
+| `--cve-offline` | — | Prevent network access during CVE operations |
 
 ---
 
@@ -129,6 +152,12 @@ ignorelist = ["root"]
 | `PORT_SCAN_DETECTED` | ≥ 10 firewall DROPs from one source IP | HIGH / CRITICAL |
 | `AUTH_FAILURE` | Generic PAM authentication failure | LOW |
 | `CRON_ROOT_CMD` | Cron job executed as root (off-hours escalates) | LOW / MEDIUM |
+| `WINDOWS_FAILED_LOGON` | Security event 4625 | LOW |
+| `WINDOWS_SUCCESSFUL_LOGON` | Security event 4624 | LOW → HIGH |
+| `WINDOWS_AUDIT_LOG_CLEARED` | Security event 1102 | CRITICAL |
+| `WINDOWS_SERVICE_INSTALLED` | System event 7045 | HIGH |
+| `WINDOWS_POWERSHELL_ACTIVITY` | PowerShell event 4103/4104 | LOW / HIGH |
+| `WINDOWS_DEFENDER_DETECTION` | Defender event 1116/1117 | HIGH / CRITICAL |
 
 ---
 
@@ -182,7 +211,9 @@ Things planned or in progress — not yet implemented:
 - Port scan detection is heuristic (DROP count per source IP); sophisticated scans spread across many IPs will not be caught
 - No support for compressed/rotated logs (`.gz`, `.1`, etc.) yet
 - Requires direct file read access — does not parse `journald` binary logs
-- Windows support is currently best-effort and uses a small set of platform-aware default paths rather than full Event Log integration
+- Windows Event Log collection requires `pywin32`, suitable audit policy, and usually administrator access; missing or disabled channels are not evidence that the host is clean
+- CVE matching is conservative and currently heuristic; registry product names do not guarantee exact CPE applicability, so matches include confidence metadata
+- NVD synchronization requires network access and is subject to NVD rate limits; `NVD_API_KEY` is optional and is never stored in the database or reports
 - LogScope is not a centralized SIEM: it does not collect from multiple hosts or provide a shared dashboard and investigation workflow
 
 ---
